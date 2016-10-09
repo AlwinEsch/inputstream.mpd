@@ -23,15 +23,16 @@
 #include <string.h>
 #include <sstream>
 
-#include "xbmc_addon_types.h"
-#include "libXBMC_addon.h"
+#include <dlfcn.h>
+
 #include "helpers.h"
-#include "kodi_vfs_types.h"
 #include "SSD_dll.h"
+
+#include <kodi/General.h>
+#include <kodi/VFS.h>
 
 #define SAFE_DELETE(p)       do { delete (p);     (p)=NULL; } while (0)
 
-ADDON::CHelper_libXBMC_addon *xbmc = 0;
 std::uint16_t kodiDisplayWidth(0), kodiDisplayHeight(0);
 
 /*******************************************************
@@ -52,39 +53,45 @@ public:
 
   virtual void* CURLCreate(const char* strURL) override
   {
-    return xbmc->CURLCreate(strURL);
+    kodi::vfs::CFile* file = new kodi::vfs::CFile;
+    if (!file->CURLCreate(strURL))
+    {
+      delete file;
+      file = nullptr;
+    }
+    return file;
   };
 
   virtual bool CURLAddOption(void* file, CURLOPTIONS opt, const char* name, const char * value)override
   {
-    const XFILE::CURLOPTIONTYPE xbmcmap[] = {XFILE::CURL_OPTION_PROTOCOL, XFILE::CURL_OPTION_HEADER};
-    return xbmc->CURLAddOption(file, xbmcmap[opt], name, value);
+    const CURLOptiontype xbmcmap[] = {ADDON_CURL_OPTION_PROTOCOL, ADDON_CURL_OPTION_HEADER};
+    return static_cast<kodi::vfs::CFile*>(file)->CURLAddOption(xbmcmap[opt], name, value);
   }
 
   virtual bool CURLOpen(void* file)override
   {
-    return xbmc->CURLOpen(file, XFILE::READ_NO_CACHE);
+    return static_cast<kodi::vfs::CFile*>(file)->CURLOpen(READ_NO_CACHE);
   };
 
   virtual size_t ReadFile(void* file, void* lpBuf, size_t uiBufSize)override
   {
-    return xbmc->ReadFile(file, lpBuf, uiBufSize);
+    return static_cast<kodi::vfs::CFile*>(file)->Read(lpBuf, uiBufSize);
   };
 
   virtual void CloseFile(void* file)override
   {
-    return xbmc->CloseFile(file);
+    delete static_cast<kodi::vfs::CFile*>(file);
   };
 
   virtual bool CreateDirectory(const char *dir)override
   {
-    return xbmc->CreateDirectory(dir);
+    return kodi::vfs::CreateDirectory(dir);
   };
 
   virtual void Log(LOGLEVEL level, const char *msg)override
   {
-    const ADDON::addon_log_t xbmcmap[] = { ADDON::LOG_DEBUG, ADDON::LOG_INFO, ADDON::LOG_ERROR };
-    return xbmc->Log(xbmcmap[level], msg);
+    const AddonLog xbmcmap[] = { LOG_DEBUG, LOG_INFO, LOG_ERROR };
+    return kodi::Log(xbmcmap[level], msg);
   };
 
   void SetLibraryPath(const char *libraryPath)
@@ -111,24 +118,16 @@ public:
     m_strProfilePath.resize(m_strProfilePath.find_last_of(pathSep[0], m_strProfilePath.length() - 1));
     m_strProfilePath.resize(m_strProfilePath.find_last_of(pathSep[0], m_strProfilePath.length() - 1) + 1);
 
-    xbmc->CreateDirectory(m_strProfilePath.c_str());
+    kodi::vfs::CreateDirectory(m_strProfilePath);
     m_strProfilePath += "cdm";
     m_strProfilePath += pathSep;
-    xbmc->CreateDirectory(m_strProfilePath.c_str());
+    kodi::vfs::CreateDirectory(m_strProfilePath);
   }
 
 private:
   std::string m_strProfilePath, m_strLibraryPath;
 
 }kodihost;
-
-struct addonstring
-{
-    addonstring(char *d){data_= d;};
-    ~addonstring() {xbmc->FreeString(data_);};
-    const char* c_str() {return data_? data_:"";};
-    char *data_;
-};
 
 /*******************************************************
 Bento4 Streams
@@ -184,24 +183,23 @@ Kodi Streams implementation
 bool KodiDASHTree::download(const char* url)
 {
   // open the file
-  void* file = xbmc->CURLCreate(url);
-  if (!file)
+  kodi::vfs::CFile file;
+
+  if (!file.CURLCreate(url))
     return false;
-  xbmc->CURLAddOption(file, XFILE::CURL_OPTION_PROTOCOL, "seekable", "0");
-  xbmc->CURLAddOption(file, XFILE::CURL_OPTION_PROTOCOL, "acceptencoding", "gzip");
-  xbmc->CURLOpen(file, XFILE::READ_CHUNKED | XFILE::READ_NO_CACHE);
+  file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "seekable", "0");
+  file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "acceptencoding", "gzip");
+  file.CURLOpen(READ_CHUNKED | READ_NO_CACHE);
 
   // read the file
   static const unsigned int CHUNKSIZE = 16384;
   char buf[CHUNKSIZE];
   size_t nbRead;
-  while ((nbRead = xbmc->ReadFile(file, buf, CHUNKSIZE)) > 0 && ~nbRead && write_data(buf, nbRead));
+  while ((nbRead = file.Read(buf, CHUNKSIZE)) > 0 && ~nbRead && write_data(buf, nbRead));
 
-  //download_speed_ = xbmc->GetFileDownloadSpeed(file);
+  //download_speed_ = file.GetFileDownloadSpeed();
 
-  xbmc->CloseFile(file);
-
-  xbmc->Log(ADDON::LOG_DEBUG, "Download %s finished", url);
+  kodi::Log(LOG_DEBUG, "Download %s finished", url);
 
   return nbRead == 0;
 }
@@ -209,30 +207,27 @@ bool KodiDASHTree::download(const char* url)
 bool KodiDASHStream::download(const char* url, const char* rangeHeader)
 {
   // open the file
-  void* file = xbmc->CURLCreate(url);
-  if (!file)
-    return false;
-  xbmc->CURLAddOption(file, XFILE::CURL_OPTION_PROTOCOL, "seekable" , "0");
-  if (rangeHeader)
-    xbmc->CURLAddOption(file, XFILE::CURL_OPTION_HEADER, "Range", rangeHeader);
-  xbmc->CURLAddOption(file, XFILE::CURL_OPTION_HEADER, "Connection", "keep-alive");
-  xbmc->CURLAddOption(file, XFILE::CURL_OPTION_PROTOCOL, "acceptencoding", "gzip, deflate");
+  kodi::vfs::CFile file;
 
-  xbmc->CURLOpen(file, XFILE::READ_CHUNKED | XFILE::READ_NO_CACHE | XFILE::READ_AUDIO_VIDEO);
+  if (!file.CURLCreate(url))
+    return false;
+  file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "seekable" , "0");
+  file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "acceptencoding", "gzip");
+  file.CURLOpen(READ_CHUNKED | READ_NO_CACHE);
 
   // read the file
   char *buf = (char*)malloc(1024*1024);
   size_t nbRead, nbReadOverall = 0;
-  while ((nbRead = xbmc->ReadFile(file, buf, 1024 * 1024)) > 0 && ~nbRead && write_data(buf, nbRead)) nbReadOverall+= nbRead;
+  while ((nbRead = file.Read(buf, 1024 * 1024)) > 0 && ~nbRead && write_data(buf, nbRead)) nbReadOverall+= nbRead;
   free(buf);
 
   if (!nbReadOverall)
   {
-    xbmc->Log(ADDON::LOG_ERROR, "Download %s doesn't provide any data: invalid", url);
+    kodi::Log(LOG_ERROR, "Download %s doesn't provide any data: invalid", url);
     return false;
   }
 
-  double current_download_speed_ = xbmc->GetFileDownloadSpeed(file);
+  double current_download_speed_ = file.GetDownloadSpeed();
   //Calculate the new downloadspeed to 1MB
   static const size_t ref_packet = 1024 * 1024;
   if (nbReadOverall >= ref_packet)
@@ -243,9 +238,7 @@ bool KodiDASHStream::download(const char* url, const char* rangeHeader)
     set_download_speed((get_download_speed() * (1.0 - ratio)) + current_download_speed_*ratio);
   }
 
-  xbmc->CloseFile(file);
-
-  xbmc->Log(ADDON::LOG_DEBUG, "Download %s finished, average download speed: %0.4lf", url, get_download_speed());
+  kodi::Log(LOG_DEBUG, "Download %s finished, average download speed: %0.4lf", url, get_download_speed());
 
   return nbRead == 0;
 }
@@ -253,18 +246,20 @@ bool KodiDASHStream::download(const char* url, const char* rangeHeader)
 bool KodiDASHStream::parseIndexRange()
 {
   // open the file
-  xbmc->Log(ADDON::LOG_DEBUG, "Downloading %s for SIDX generation", getRepresentation()->url_.c_str());
+  kodi::Log(LOG_DEBUG, "Downloading %s for SIDX generation", getRepresentation()->url_.c_str());
 
-  void* file = xbmc->CURLCreate(getRepresentation()->url_.c_str());
-  if (!file)
+  kodi::vfs::CFile file;
+
+  if (!file.CURLCreate(getRepresentation()->url_))
     return false;
-  xbmc->CURLAddOption(file, XFILE::CURL_OPTION_PROTOCOL, "seekable", "0");
+
+  file.CURLAddOption(ADDON_CURL_OPTION_PROTOCOL, "seekable", "0");
   char rangebuf[64];
   sprintf(rangebuf, "bytes=%u-%u", getRepresentation()->indexRangeMin_, getRepresentation()->indexRangeMax_);
-  xbmc->CURLAddOption(file, XFILE::CURL_OPTION_HEADER, "Range", rangebuf);
-  if (!xbmc->CURLOpen(file, XFILE::READ_CHUNKED | XFILE::READ_NO_CACHE | XFILE::READ_AUDIO_VIDEO))
+  file.CURLAddOption(ADDON_CURL_OPTION_HEADER, "Range", rangebuf);
+  if (!file.CURLOpen(READ_CHUNKED | READ_NO_CACHE | READ_AUDIO_VIDEO))
   {
-    xbmc->Log(ADDON::LOG_ERROR, "Download SIDX retrieval failed");
+    kodi::Log(LOG_ERROR, "Download SIDX retrieval failed");
     return false;
   }
 
@@ -273,12 +268,11 @@ bool KodiDASHStream::parseIndexRange()
 
   char buf[16384];
   size_t nbRead, nbReadOverall = 0;
-  while ((nbRead = xbmc->ReadFile(file, buf, 16384)) > 0 && ~nbRead && AP4_SUCCEEDED(byteStream.Write(buf, nbRead))) nbReadOverall += nbRead;
-  xbmc->CloseFile(file);
+  while ((nbRead = file.Read(buf, 16384)) > 0 && ~nbRead && AP4_SUCCEEDED(byteStream.Write(buf, nbRead))) nbReadOverall += nbRead;
 
   if (nbReadOverall != getRepresentation()->indexRangeMax_ - getRepresentation()->indexRangeMin_ +1)
   {
-    xbmc->Log(ADDON::LOG_ERROR, "Size of downloaded SIDX section differs from expected");
+    kodi::Log(LOG_ERROR, "Size of downloaded SIDX section differs from expected");
     return false;
   }
   byteStream.Seek(0);
@@ -292,7 +286,7 @@ bool KodiDASHStream::parseIndexRange()
     AP4_Movie* movie = f.GetMovie();
     if (movie == NULL)
     {
-      xbmc->Log(ADDON::LOG_ERROR, "No MOOV in stream!");
+      kodi::Log(LOG_ERROR, "No MOOV in stream!");
       return false;
     }
     rep->flags_ |= dash::DASHTree::Representation::INITIALIZATION;
@@ -311,7 +305,7 @@ bool KodiDASHStream::parseIndexRange()
     AP4_Atom *atom(NULL);
     if (AP4_FAILED(AP4_DefaultAtomFactory::Instance.CreateAtomFromStream(byteStream, atom)))
     {
-      xbmc->Log(ADDON::LOG_ERROR, "Unable to create SIDX from IndexRange bytes");
+      kodi::Log(LOG_ERROR, "Unable to create SIDX from IndexRange bytes");
       return false;
     }
 
@@ -564,7 +558,7 @@ public:
     , m_bSampleDescChanged(false)
   {
     EnableTrack(m_Track->GetId());
-    
+
     AP4_SampleDescription *desc(m_Track->GetSampleDescription(0));
     if (desc->GetType() == AP4_SampleDescription::TYPE_PROTECTED)
       m_Protected_desc = static_cast<AP4_ProtectedSampleDescription*>(desc);
@@ -608,7 +602,7 @@ public:
       m_SingleSampleDecryptor->SetKeyId(m_DefaultKey?16:0, m_DefaultKey);
       if (AP4_FAILED(result = m_Decrypter->DecryptSampleData(m_encrypted, m_sample_data_, NULL)))
       {
-        xbmc->Log(ADDON::LOG_ERROR, "Decrypt Sample returns failure!");
+        kodi::Log(LOG_ERROR, "Decrypt Sample returns failure!");
         Reset(true);
         return result;
       }
@@ -798,7 +792,6 @@ private:
 /*******************************************************
 Main class Session
 ********************************************************/
-Session *session = 0;
 
 void Session::STREAM::disable()
 {
@@ -812,7 +805,7 @@ void Session::STREAM::disable()
   }
 }
 
-Session::Session(const char *strURL, const char *strLicType, const char* strLicKey, const char* strLicData, const char* profile_path)
+Session::Session(std::string strURL, std::string strLicType, std::string strLicKey, std::string strLicData, std::string profile_path)
   :single_sample_decryptor_(0)
   , mpdFileURL_(strURL)
   , license_type_(strLicType)
@@ -839,11 +832,11 @@ Session::Session(const char *strURL, const char *strLicType, const char* strLicK
   }
   else
     dashtree_.bandwidth_ = 4000000;
-  xbmc->Log(ADDON::LOG_DEBUG, "Initial bandwidth: %u ", dashtree_.bandwidth_);
+  kodi::Log(LOG_DEBUG, "Initial bandwidth: %u ", dashtree_.bandwidth_);
 
   int buf;
-  xbmc->GetSetting("MAXRESOLUTION", (char*)&buf);
-  xbmc->Log(ADDON::LOG_DEBUG, "MAXRESOLUTION selected: %d ", buf);
+  kodi::GetSettingInt("MAXRESOLUTION", buf);
+  kodi::Log(LOG_DEBUG, "MAXRESOLUTION selected: %d ", buf);
   switch (buf)
   {
   case 0:
@@ -864,11 +857,11 @@ Session::Session(const char *strURL, const char *strLicType, const char* strLicK
   if (height_ > maxheight_)
     height_ = maxheight_;
 
-  xbmc->GetSetting("STREAMSELECTION", (char*)&buf);
-  xbmc->Log(ADDON::LOG_DEBUG, "STREAMSELECTION selected: %d ", buf);
+  kodi::GetSettingInt("STREAMSELECTION", buf);
+  kodi::Log(LOG_DEBUG, "STREAMSELECTION selected: %d ", buf);
   manual_streams_ = buf != 0;
 
-  xbmc->GetSetting("MEDIATYPE", (char*)&buf);
+  kodi::GetSettingInt("MEDIATYPE", buf);
   switch (buf)
   {
   case 1:
@@ -908,31 +901,29 @@ Session::~Session()
 void Session::GetSupportedDecrypterURN(std::pair<std::string, std::string> &urn)
 {
   typedef SSD_DECRYPTER *(*CreateDecryptorInstanceFunc)(SSD_HOST *host, uint32_t version);
-  
-  char specialpath[1024];
-  if (!xbmc->GetSetting("DECRYPTERPATH", specialpath))
+
+  std::string specialpath;
+  if (!kodi::GetSettingString("DECRYPTERPATH", specialpath))
   {
-    xbmc->Log(ADDON::LOG_DEBUG, "DECRYPTERPATH not specified in settings.xml");
+    kodi::Log(LOG_DEBUG, "DECRYPTERPATH not specified in settings.xml");
     return;
   }
-  addonstring path(xbmc->TranslateSpecialProtocol(specialpath));
-  
+  std::string path(kodi::TranslatePath(specialpath));
+
   kodihost.SetLibraryPath(path.c_str());
-  
-  VFSDirEntry *items(0);
-  unsigned int num_items(0);
 
-  xbmc->Log(ADDON::LOG_DEBUG, "Searching for decrypters in: %s", path.c_str());
+  kodi::Log(LOG_DEBUG, "Searching for decrypters in: %s", path.c_str());
 
-  if (!xbmc->GetDirectory(path.c_str(), "", &items, &num_items))
+  std::vector<kodi::vfs::CVFSDirEntry> items;
+  if (!kodi::vfs::GetDirectory(path, "", items))
     return;
 
-  for (unsigned int i(0); i < num_items; ++i)
+  for (unsigned int i = 0; i < items.size(); ++i)
   {
-    if (strncmp(items[i].label, "ssd_", 4) && strncmp(items[i].label, "libssd_", 7))
+    if (strncmp(items[i].Label().c_str(), "ssd_", 4) && strncmp(items[i].Label().c_str(), "libssd_", 7))
       continue;
 
-    void * mod(dlopen(items[i].path, RTLD_LAZY));
+    void * mod(dlopen(items[i].Path().c_str(), RTLD_LAZY));
     if (mod)
     {
       CreateDecryptorInstanceFunc startup;
@@ -943,7 +934,7 @@ void Session::GetSupportedDecrypterURN(std::pair<std::string, std::string> &urn)
 
         if (decrypter && (suppUrn = decrypter->Supported(license_type_.c_str(), license_key_.c_str())))
         {
-          xbmc->Log(ADDON::LOG_DEBUG, "Found decrypter: %s", items[i].path);
+          kodi::Log(LOG_DEBUG, "Found decrypter: %s", items[i].Path().c_str());
           decrypterModule_ = mod;
           decrypter_ = decrypter;
           urn.first = suppUrn;
@@ -954,10 +945,9 @@ void Session::GetSupportedDecrypterURN(std::pair<std::string, std::string> &urn)
     }
     else
     {
-      xbmc->Log(ADDON::LOG_DEBUG, "%s", dlerror());
+      kodi::Log(LOG_DEBUG, "%s", dlerror());
     }
   }
-  xbmc->FreeDirectory(items, num_items);
 }
 
 AP4_CencSingleSampleDecrypter *Session::CreateSingleSampleDecrypter(AP4_DataBuffer &streamCodec)
@@ -977,36 +967,35 @@ bool Session::initialize()
   if (!license_type_.empty())
   {
     GetSupportedDecrypterURN(dashtree_.adp_pssh_);
-    xbmc->Log(ADDON::LOG_DEBUG, "Supported URN: %s", dashtree_.adp_pssh_.first.c_str());
+    kodi::Log(LOG_DEBUG, "Supported URN: %s", dashtree_.adp_pssh_.first.c_str());
   }
 
   // Open mpd file
   const char* delim(strrchr(mpdFileURL_.c_str(), '/'));
   if (!delim)
   {
-    xbmc->Log(ADDON::LOG_ERROR, "Invalid mpdURL: / expected (%s)", mpdFileURL_.c_str());
+    kodi::Log(LOG_ERROR, "Invalid mpdURL: / expected (%s)", mpdFileURL_.c_str());
     return false;
   }
   dashtree_.base_url_ = std::string(mpdFileURL_.c_str(), (delim - mpdFileURL_.c_str()) + 1);
 
   if (!dashtree_.open(mpdFileURL_.c_str()) || dashtree_.empty())
   {
-    xbmc->Log(ADDON::LOG_ERROR, "Could not open / parse mpdURL (%s)", mpdFileURL_.c_str());
+    kodi::Log(LOG_ERROR, "Could not open / parse mpdURL (%s)", mpdFileURL_.c_str());
     return false;
   }
-  xbmc->Log(ADDON::LOG_INFO, "Successfully parsed .mpd file. #Streams: %d Download speed: %0.4f Bytes/s", dashtree_.periods_[0]->adaptationSets_.size(), dashtree_.download_speed_);
+  kodi::Log(LOG_INFO, "Successfully parsed .mpd file. #Streams: %d Download speed: %0.4f Bytes/s", dashtree_.periods_[0]->adaptationSets_.size(), dashtree_.download_speed_);
 
   if (dashtree_.encryptionState_ == dash::DASHTree::ENCRYTIONSTATE_ENCRYPTED)
   {
-    xbmc->Log(ADDON::LOG_ERROR, "Unable to handle decryption. Unsupported!");
+    kodi::Log(LOG_ERROR, "Unable to handle decryption. Unsupported!");
     return false;
   }
 
-  uint32_t min_bandwidth(0), max_bandwidth(0);
+  int min_bandwidth(0), max_bandwidth(0);
   {
-    int buf;
-    xbmc->GetSetting("MINBANDWIDTH", (char*)&buf); min_bandwidth = buf;
-    xbmc->GetSetting("MAXBANDWIDTH", (char*)&buf); max_bandwidth = buf;
+    kodi::GetSettingInt("MINBANDWIDTH", min_bandwidth);
+    kodi::GetSettingInt("MAXBANDWIDTH", max_bandwidth);
   }
 
   // create SESSION::STREAM objects. One for each AdaptationSet
@@ -1065,7 +1054,7 @@ bool Session::initialize()
           strkey.erase(pos, 1);
         if (strkey.size() != 32)
         {
-          xbmc->Log(ADDON::LOG_ERROR, "Key system mismatch (%s)!", dashtree_.adp_pssh_.first.c_str());
+          kodi::Log(LOG_ERROR, "Key system mismatch (%s)!", dashtree_.adp_pssh_.first.c_str());
           return false;
         }
 
@@ -1083,7 +1072,7 @@ bool Session::initialize()
         AP4_Movie* movie = stream->input_file_->GetMovie();
         if (movie == NULL)
         {
-          xbmc->Log(ADDON::LOG_ERROR, "No MOOV in stream!");
+          kodi::Log(LOG_ERROR, "No MOOV in stream!");
           stream->disable();
           return false;
         }
@@ -1097,7 +1086,7 @@ bool Session::initialize()
 
         if (!init_data.GetDataSize())
         {
-          xbmc->Log(ADDON::LOG_ERROR, "Could not extract license from video stream (PSSH not found)");
+          kodi::Log(LOG_ERROR, "Could not extract license from video stream (PSSH not found)");
           stream->disable();
           return false;
         }
@@ -1197,7 +1186,6 @@ FragmentedSampleReader *Session::GetNextSample()
     if ((*b)->enabled && !(*b)->reader_->EOS() && AP4_SUCCEEDED((*b)->reader_->Start(bStarted))
       && (!res || (*b)->reader_->DTS() < res->reader_->DTS()))
       res = *b;
-    
     if (bStarted && ((*b)->reader_->GetInformation((*b)->info_)))
       changed_ = true;
   }
@@ -1228,7 +1216,7 @@ bool Session::SeekTime(double seekTime, unsigned int streamId, bool preceeding)
           (*b)->reader_->Reset(true);
         else
         {
-          xbmc->Log(ADDON::LOG_INFO, "seekTime(%0.4f) for Stream:%d continues at %0.4f", seekTime, (*b)->info_.m_pID, (*b)->reader_->PTS());
+          kodi::Log(LOG_INFO, "seekTime(%0.4f) for Stream:%d continues at %0.4f", seekTime, (*b)->info_.m_pID, (*b)->reader_->PTS());
           ret = true;
         }
       }
@@ -1255,395 +1243,291 @@ void Session::EndFragment(AP4_UI32 streamId)
     s->reader_->GetTimeScale());
 }
 
+
+class CInputStreamMPD : public kodi::addon::CInstanceInputStream
+{
+public:
+  CInputStreamMPD(void* instance);
+  virtual ~CInputStreamMPD();
+
+  virtual void GetCapabilities(INPUTSTREAM_CAPABILITIES& capabilities) override;
+  virtual bool Open(const std::string& strURL, const std::map<std::string, std::string>& listItemProperties) override;
+  virtual void Close() override;
+  virtual void GetStreamIds(std::vector<int>& ids) override;
+  virtual void GetStream(int streamId, INPUTSTREAM_INFO& info) override;
+  virtual void EnableStream(int streamid, bool enable) override;
+  virtual DemuxPacket* DemuxRead() override;
+  virtual bool DemuxSeekTime(int time, bool backwards, double& startpts) override;
+  virtual void SetVideoResolution(int width, int height) override;
+  virtual int GetTotalTime() override;
+  virtual int GetTime() override;
+  virtual bool CanPauseStream() override;
+  virtual bool CanSeekStream() override;
+
+private:
+  Session* m_session;
+};
+
+/***********************************************************
+* InputSteam Client AddOn specific public library functions
+***********************************************************/
+
+CInputStreamMPD::CInputStreamMPD(void* instance)
+  : CInstanceInputStream(instance),
+    m_session(nullptr)
+{
+}
+
+CInputStreamMPD::~CInputStreamMPD()
+{
+}
+
+void CInputStreamMPD::GetCapabilities(INPUTSTREAM_CAPABILITIES& capabilities)
+{
+  kodi::Log(LOG_DEBUG, "GetCapabilities()");
+
+  capabilities.m_supportsIDemux = true;
+  capabilities.m_supportsIPosTime = false;
+  capabilities.m_supportsIDisplayTime = true;
+  capabilities.m_supportsSeek = m_session && !m_session->IsLive();
+  capabilities.m_supportsPause = capabilities.m_supportsSeek;
+}
+
+bool CInputStreamMPD::Open(const std::string& strURL, const std::map<std::string, std::string>& listItemProperties)
+{
+  kodi::Log(LOG_DEBUG, "Open()");
+
+  kodihost.SetProfilePath(ProfileFolder().c_str());
+
+  std::string lt;
+  std::string lk;
+  std::string ld;
+
+  for (std::map<std::string, std::string>::const_iterator it=listItemProperties.begin(); it!=listItemProperties.end(); ++it)
+  {
+    if (it->first == "inputstream.mpd.license_type")
+    {
+      kodi::Log(LOG_DEBUG, "found inputstream.mpd.license_type: %s", it->second.c_str());
+      lt = it->second;
+    }
+    else if (it->first == "inputstream.mpd.license_key")
+    {
+      kodi::Log(LOG_DEBUG, "found inputstream.mpd.license_key: [not shown]");
+      lk = it->second;
+    }
+    else if (it->first == "inputstream.mpd.license_data")
+    {
+      kodi::Log(LOG_DEBUG, "found inputstream.mpd.license_data: [not shown]");
+      ld = it->second;
+    }
+  }
+
+  m_session = new Session(URL(), lt, lk, ld, ProfileFolder());
+
+  if (!m_session->initialize())
+  {
+    SAFE_DELETE(m_session);
+    m_session = nullptr;
+    return false;
+  }
+  return true;
+}
+
+void CInputStreamMPD::Close()
+{
+  kodi::Log(LOG_DEBUG, "Close()");
+  SAFE_DELETE(m_session);
+  m_session = nullptr;
+}
+
+void CInputStreamMPD::GetStreamIds(std::vector<int>& ids)
+{
+  kodi::Log(LOG_DEBUG, "GetStreamIds()");
+
+  if(m_session)
+  {
+    for (unsigned int i(1); i <= m_session->GetStreamCount(); ++i)
+      if(m_session->getMediaTypeMask() & static_cast<uint8_t>(1) << m_session->GetStream(i)->stream_.get_type())
+        ids.push_back(i);
+  }
+}
+
+void CInputStreamMPD::GetStream(int streamId, INPUTSTREAM_INFO& info)
+{
+  kodi::Log(LOG_DEBUG, "GetStream(%d)", streamId);
+  Session::STREAM *stream(m_session->GetStream(streamId));
+  info = stream->info_;
+}
+
+void CInputStreamMPD::EnableStream(int streamid, bool enable)
+{
+  kodi::Log(LOG_DEBUG, "EnableStream(%d: %s)", streamid, enable?"true":"false");
+
+  if (!m_session)
+    return;
+
+  Session::STREAM *stream(m_session->GetStream(streamid));
+
+  if (!stream)
+    return;
+
+  if (enable)
+  {
+    if (stream->enabled)
+      return;
+
+    stream->enabled = true;
+
+    stream->stream_.start_stream(~0, m_session->GetWidth(), m_session->GetHeight());
+    const dash::DASHTree::Representation *rep(stream->stream_.getRepresentation());
+    kodi::Log(LOG_DEBUG, "Selecting stream with conditions: w: %u, h: %u, bw: %u",
+      stream->stream_.getWidth(), stream->stream_.getHeight(), stream->stream_.getBandwidth());
+
+    if (!stream->stream_.select_stream(true, false, stream->info_.m_pID >> 16))
+    {
+      kodi::Log(LOG_ERROR, "Unable to select stream!");
+      return stream->disable();
+    }
+
+    if(rep != stream->stream_.getRepresentation())
+    {
+      m_session->UpdateStream(*stream);
+      m_session->CheckChange(true);
+    }
+
+    stream->input_ = new AP4_DASHStream(&stream->stream_);
+    stream->input_file_ = new AP4_File(*stream->input_, AP4_DefaultAtomFactory::Instance, true);
+    AP4_Movie* movie = stream->input_file_->GetMovie();
+    if (movie == NULL)
+    {
+      kodi::Log(LOG_ERROR, "No MOOV in stream!");
+      return stream->disable();
+    }
+
+    static const AP4_Track::Type TIDC[dash::DASHTree::STREAM_TYPE_COUNT] =
+    { AP4_Track::TYPE_UNKNOWN, AP4_Track::TYPE_VIDEO, AP4_Track::TYPE_AUDIO, AP4_Track::TYPE_TEXT };
+
+    AP4_Track *track = movie->GetTrack(TIDC[stream->stream_.get_type()]);
+    if (!track)
+    {
+      kodi::Log(LOG_ERROR, "No suitable track found in stream");
+      return stream->disable();
+    }
+
+    stream->reader_ = new FragmentedSampleReader(stream->input_, movie, track, streamid, m_session->GetSingleSampleDecryptor(), m_session->GetPresentationTimeOffset());
+    stream->reader_->SetObserver(dynamic_cast<FragmentObserver*>(m_session));
+
+    return;
+  }
+  return stream->disable();
+}
+
+DemuxPacket* CInputStreamMPD::DemuxRead()
+{
+  if (!m_session)
+    return NULL;
+
+  FragmentedSampleReader *sr(m_session->GetNextSample());
+
+  if (m_session->CheckChange())
+  {
+    DemuxPacket *p = AllocateDemuxPacket(0);
+    p->iStreamId = DMX_SPECIALID_STREAMCHANGE;
+    kodi::Log(LOG_DEBUG, "DMX_SPECIALID_STREAMCHANGE");
+    return p;
+  }
+
+  if (sr)
+  {
+    const AP4_Sample &s(sr->Sample());
+    DemuxPacket *p = AllocateDemuxPacket(sr->GetSampleDataSize());
+    p->dts = sr->DTS() * 1000000;
+    p->pts = sr->PTS() * 1000000;
+    p->duration = sr->GetDuration() * 1000000;
+    p->iStreamId = sr->GetStreamId();
+    p->iGroupId = 0;
+    p->iSize = sr->GetSampleDataSize();
+    memcpy(p->pData, sr->GetSampleData(), p->iSize);
+
+    //kodi::Log(LOG_DEBUG, "DTS: %0.4f, PTS:%0.4f, ID: %u SZ: %d", p->dts, p->pts, p->iStreamId, p->iSize);
+
+    sr->ReadSample();
+    return p;
+  }
+  return NULL;
+}
+
+bool CInputStreamMPD::DemuxSeekTime(int time, bool backwards, double& startpts)
+{
+  if (!m_session)
+    return false;
+
+  kodi::Log(LOG_INFO, "DemuxSeekTime (%d)", time);
+
+  return m_session->SeekTime(static_cast<double>(time)*0.001f, 0, !backwards);
+}
+
+void CInputStreamMPD::SetVideoResolution(int width, int height)
+{
+  kodi::Log(LOG_INFO, "SetVideoResolution (%d x %d)", width, height);
+  if (m_session)
+    m_session->SetVideoResolution(width, height);
+  else
+  {
+    kodiDisplayWidth = width;
+    kodiDisplayHeight = height;
+  }
+}
+
+int CInputStreamMPD::GetTotalTime()
+{
+  if (!m_session)
+    return 0;
+
+  return static_cast<int>(m_session->GetTotalTime()*1000);
+}
+
+int CInputStreamMPD::GetTime()
+{
+  if (!m_session)
+    return 0;
+
+  return static_cast<int>(m_session->GetPTS() * 1000);
+}
+
+bool CInputStreamMPD::CanPauseStream()
+{
+  return true;
+}
+
+bool CInputStreamMPD::CanSeekStream()
+{
+  return m_session && !m_session->IsLive();
+}
+
 /***************************  Interface *********************************/
 
-#include "kodi_inputstream_dll.h"
-#include "libKODI_inputstream.h"
-
-CHelper_libKODI_inputstream *ipsh = 0;
-
-extern "C" {
-
-  ADDON_STATUS curAddonStatus = ADDON_STATUS_UNKNOWN;
-
-  /***********************************************************
-  * Standard AddOn related public library functions
-  ***********************************************************/
-
-  ADDON_STATUS ADDON_Create(void* hdl, void* props)
-  {
-    // initialize globals
-    session = nullptr;
-    kodiDisplayWidth = 1280;
-    kodiDisplayHeight = 720;
-
-    if (!hdl)
-      return ADDON_STATUS_UNKNOWN;
-
-    xbmc = new ADDON::CHelper_libXBMC_addon;
-    if (!xbmc->RegisterMe(hdl))
-    {
-      SAFE_DELETE(xbmc);
-      return ADDON_STATUS_PERMANENT_FAILURE;
-    }
-    xbmc->Log(ADDON::LOG_DEBUG, "libXBMC_addon successfully loaded");
-
-    ipsh = new CHelper_libKODI_inputstream;
-    if (!ipsh->RegisterMe(hdl))
-    {
-      SAFE_DELETE(xbmc);
-      SAFE_DELETE(ipsh);
-      return ADDON_STATUS_PERMANENT_FAILURE;
-    }
-
-    xbmc->Log(ADDON::LOG_DEBUG, "ADDON_Create()");
-
-    curAddonStatus = ADDON_STATUS_OK;
-    return curAddonStatus;
-  }
-
-  ADDON_STATUS ADDON_GetStatus()
-  {
-    return curAddonStatus;
-  }
-
-  void ADDON_Destroy()
-  {
-    SAFE_DELETE(session);
-    if (xbmc)
-    {
-      xbmc->Log(ADDON::LOG_DEBUG, "ADDON_Destroy()");
-      SAFE_DELETE(xbmc);
-    }
-    SAFE_DELETE(ipsh);
-  }
-
-  bool ADDON_HasSettings()
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "ADDON_HasSettings()");
-    return false;
-  }
-
-  unsigned int ADDON_GetSettings(ADDON_StructSetting ***sSet)
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "ADDON_GetSettings()");
-    return 0;
-  }
-
-  ADDON_STATUS ADDON_SetSetting(const char *settingName, const void *settingValue)
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "ADDON_SetSettings()");
-    return ADDON_STATUS_OK;
-  }
-
-  void ADDON_Stop()
-  {
-  }
-
-  void ADDON_FreeSettings()
-  {
-  }
-
-  void ADDON_Announce(const char *flag, const char *sender, const char *message, const void *data)
-  {
-  }
-
-  /***********************************************************
-  * InputSteam Client AddOn specific public library functions
-  ***********************************************************/
-
-  bool Open(INPUTSTREAM& props)
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "Open()");
-
-    const char *lt(""), *lk(""), *ld("");
-    for (unsigned int i(0); i < props.m_nCountInfoValues; ++i)
-    {
-      if (strcmp(props.m_ListItemProperties[i].m_strKey, "inputstream.mpd.license_type") == 0)
-      {
-        xbmc->Log(ADDON::LOG_DEBUG, "found inputstream.mpd.license_type: %s", props.m_ListItemProperties[i].m_strValue);
-        lt = props.m_ListItemProperties[i].m_strValue;
-      }
-      else if (strcmp(props.m_ListItemProperties[i].m_strKey, "inputstream.mpd.license_key") == 0)
-      {
-        xbmc->Log(ADDON::LOG_DEBUG, "found inputstream.mpd.license_key: [not shown]");
-        lk = props.m_ListItemProperties[i].m_strValue;
-      }
-      else if (strcmp(props.m_ListItemProperties[i].m_strKey, "inputstream.mpd.license_data") == 0)
-      {
-        xbmc->Log(ADDON::LOG_DEBUG, "found inputstream.mpd.license_data: [not shown]");
-        ld = props.m_ListItemProperties[i].m_strValue;
-      }
-    }
-
-    kodihost.SetProfilePath(props.m_profileFolder);
-
-    session = new Session(props.m_strURL, lt, lk, ld, props.m_profileFolder);
-
-    if (!session->initialize())
-    {
-      SAFE_DELETE(session);
-      return false;
-    }
-    return true;
-  }
-
-  void Close(void)
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "Close()");
-    SAFE_DELETE(session);
-  }
-
-  const char* GetPathList(void)
-  {
-    return "";
-  }
-
-  struct INPUTSTREAM_IDS GetStreamIds()
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "GetStreamIds()");
-    INPUTSTREAM_IDS iids;
-
-    if(session)
-    {
-        iids.m_streamCount = 0;
-        for (unsigned int i(1); i <= session->GetStreamCount(); ++i)
-          if(session->getMediaTypeMask() & static_cast<uint8_t>(1) << session->GetStream(i)->stream_.get_type())
-            iids.m_streamIds[iids.m_streamCount++] = i;
-    } else
-        iids.m_streamCount = 0;
-    return iids;
-  }
-
-  struct INPUTSTREAM_CAPABILITIES GetCapabilities()
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "GetCapabilities()");
-    INPUTSTREAM_CAPABILITIES caps;
-    caps.m_supportsIDemux = true;
-    caps.m_supportsIPosTime = false;
-    caps.m_supportsIDisplayTime = true;
-    caps.m_supportsSeek = session && !session->IsLive();
-    caps.m_supportsPause = caps.m_supportsSeek;
-    return caps;
-  }
-
-  struct INPUTSTREAM_INFO GetStream(int streamid)
-  {
-    static struct INPUTSTREAM_INFO dummy_info = {
-      INPUTSTREAM_INFO::TYPE_NONE, "", "", 0, 0, 0, 0, "",
-      0, 0, 0, 0, 0.0f,
-      0, 0, 0, 0, 0 };
-
-    xbmc->Log(ADDON::LOG_DEBUG, "GetStream(%d)", streamid);
-
-    Session::STREAM *stream(session->GetStream(streamid));
-
-    if (stream)
-      return stream->info_;
-
-    return dummy_info;
-  }
-
-  void EnableStream(int streamid, bool enable)
-  {
-    xbmc->Log(ADDON::LOG_DEBUG, "EnableStream(%d: %s)", streamid, enable?"true":"false");
-
-    if (!session)
-      return;
-
-    Session::STREAM *stream(session->GetStream(streamid));
-
-    if (!stream)
-      return;
-
-    if (enable)
-    {
-      if (stream->enabled)
-        return;
-
-      stream->enabled = true;
-
-      stream->stream_.start_stream(~0, session->GetWidth(), session->GetHeight());
-      const dash::DASHTree::Representation *rep(stream->stream_.getRepresentation());
-      xbmc->Log(ADDON::LOG_DEBUG, "Selecting stream with conditions: w: %u, h: %u, bw: %u", 
-        stream->stream_.getWidth(), stream->stream_.getHeight(), stream->stream_.getBandwidth());
-
-      if (!stream->stream_.select_stream(true, false, stream->info_.m_pID >> 16))
-      {
-        xbmc->Log(ADDON::LOG_ERROR, "Unable to select stream!");
-        return stream->disable();
-      }
-
-      if(rep != stream->stream_.getRepresentation())
-      {
-        session->UpdateStream(*stream);
-        session->CheckChange(true);
-      }
-
-      stream->input_ = new AP4_DASHStream(&stream->stream_);
-      stream->input_file_ = new AP4_File(*stream->input_, AP4_DefaultAtomFactory::Instance, true);
-      AP4_Movie* movie = stream->input_file_->GetMovie();
-      if (movie == NULL)
-      {
-        xbmc->Log(ADDON::LOG_ERROR, "No MOOV in stream!");
-        return stream->disable();
-      }
-
-      static const AP4_Track::Type TIDC[dash::DASHTree::STREAM_TYPE_COUNT] =
-      { AP4_Track::TYPE_UNKNOWN, AP4_Track::TYPE_VIDEO, AP4_Track::TYPE_AUDIO, AP4_Track::TYPE_TEXT };
-
-      AP4_Track *track = movie->GetTrack(TIDC[stream->stream_.get_type()]);
-      if (!track)
-      {
-        xbmc->Log(ADDON::LOG_ERROR, "No suitable track found in stream");
-        return stream->disable();
-      }
-
-      stream->reader_ = new FragmentedSampleReader(stream->input_, movie, track, streamid, session->GetSingleSampleDecryptor(), session->GetPresentationTimeOffset());
-      stream->reader_->SetObserver(dynamic_cast<FragmentObserver*>(session));
-
-      return;
-    }
-    return stream->disable();
-  }
-
-  int ReadStream(unsigned char*, unsigned int)
-  {
-    return -1;
-  }
-
-  int64_t SeekStream(int64_t, int)
-  {
-    return -1;
-  }
-
-  int64_t PositionStream(void)
-  {
-    return -1;
-  }
-
-  int64_t LengthStream(void)
-  {
-    return -1;
-  }
-
-  void DemuxReset(void)
-  {
-  }
-
-  void DemuxAbort(void)
-  {
-  }
-
-  void DemuxFlush(void)
-  {
-  }
-
-  DemuxPacket* __cdecl DemuxRead(void)
-  {
-    if (!session)
-      return NULL;
-
-    FragmentedSampleReader *sr(session->GetNextSample());
-
-    if (session->CheckChange())
-    {
-      DemuxPacket *p = ipsh->AllocateDemuxPacket(0);
-      p->iStreamId = DMX_SPECIALID_STREAMCHANGE;
-      xbmc->Log(ADDON::LOG_DEBUG, "DMX_SPECIALID_STREAMCHANGE");
-      return p;
-    }
-
-    if (sr)
-    {
-      const AP4_Sample &s(sr->Sample());
-      DemuxPacket *p = ipsh->AllocateDemuxPacket(sr->GetSampleDataSize());
-      p->dts = sr->DTS() * 1000000;
-      p->pts = sr->PTS() * 1000000;
-      p->duration = sr->GetDuration() * 1000000;
-      p->iStreamId = sr->GetStreamId();
-      p->iGroupId = 0;
-      p->iSize = sr->GetSampleDataSize();
-      memcpy(p->pData, sr->GetSampleData(), p->iSize);
-
-      //xbmc->Log(ADDON::LOG_DEBUG, "DTS: %0.4f, PTS:%0.4f, ID: %u SZ: %d", p->dts, p->pts, p->iStreamId, p->iSize);
-
-      sr->ReadSample();
-      return p;
-    }
-    return NULL;
-  }
-
-  bool DemuxSeekTime(int time, bool backwards, double *startpts)
-  {
-    if (!session)
-      return false;
-
-    xbmc->Log(ADDON::LOG_INFO, "DemuxSeekTime (%d)", time);
-
-    return session->SeekTime(static_cast<double>(time)*0.001f, 0, !backwards);
-  }
-
-  void DemuxSetSpeed(int speed)
-  {
-
-  }
-
-  //callback - will be called from kodi
-  void SetVideoResolution(int width, int height)
-  {
-    xbmc->Log(ADDON::LOG_INFO, "SetVideoResolution (%d x %d)", width, height);
-    if (session)
-      session->SetVideoResolution(width, height);
-    else
-    {
-      kodiDisplayWidth = width;
-      kodiDisplayHeight = height;
-    }
-  }
-
-  int GetTotalTime()
-  {
-    if (!session)
-      return 0;
-
-    return static_cast<int>(session->GetTotalTime()*1000);
-  }
-
-  int GetTime()
-  {
-    if (!session)
-      return 0;
-
-    return static_cast<int>(session->GetPTS() * 1000);
-  }
-
-  bool CanPauseStream(void)
-  {
-    return true;
-  }
-
-  bool CanSeekStream(void)
-  {
-    return session && !session->IsLive();
-  }
-
-  bool PosTime(int)
-  {
-    return false;
-  }
-
-  void SetSpeed(int)
-  {
-  }
-
-  void PauseStream(double)
-  {
-  }
-
-  bool IsRealTimeStream(void)
-  {
-    return false;
-  }
-
-}//extern "C"
+class CMyAddon : public ::kodi::addon::CAddonBase
+{
+public:
+  CMyAddon();
+  virtual ADDON_STATUS CreateInstance(int instanceType,
+                                      std::string instanceID,
+                                      KODI_HANDLE instance,
+                                      KODI_HANDLE& addonInstance) override;
+};
+
+CMyAddon::CMyAddon()
+{
+  // initialize globals
+  kodiDisplayWidth = 1280;
+  kodiDisplayHeight = 720;
+}
+
+ADDON_STATUS CMyAddon::CreateInstance(int instanceType, std::string instanceID, KODI_HANDLE instance, KODI_HANDLE& addonInstance)
+{
+  addonInstance = new CInputStreamMPD(instance);
+  return ADDON_STATUS_OK;
+}
+
+ADDONCREATOR(CMyAddon);

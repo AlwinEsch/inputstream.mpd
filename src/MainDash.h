@@ -25,7 +25,7 @@
 
 #include "Ap4.h"
 
-#include "kodi_inputstream_types.h"
+#include <kodi/inputstream/InputStream.h>
 
 class FragmentedSampleReader;
 class SSD_DECRYPTER;
@@ -78,7 +78,7 @@ public:
 class Session: public FragmentObserver
 {
 public:
-  Session(const char *strURL, const char *strLicType, const char* strLicKey, const char* strLicData, const char* profile_path);
+  Session(std::string strURL, std::string strLicType, std::string strLicKey, std::string strLicData, std::string profile_path);
   ~Session();
   bool initialize();
   FragmentedSampleReader *GetNextSample();
