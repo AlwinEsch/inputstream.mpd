@@ -23,6 +23,12 @@
 #include <string.h>
 #include <sstream>
 
+#ifdef _WIN32                   // windows
+#include <p8-platform/windows/dlfcn-win32.h>
+#else
+#include <dlfcn.h>              // linux+osx
+#endif
+
 #include "xbmc_addon_types.h"
 #include "libXBMC_addon.h"
 #include "helpers.h"
