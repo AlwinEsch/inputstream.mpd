@@ -1346,10 +1346,6 @@ extern "C" {
     return ADDON_STATUS_OK;
   }
 
-  void ADDON_Stop()
-  {
-  }
-
   void ADDON_FreeSettings()
   {
   }
